@@ -8,7 +8,7 @@ import threading
 TOKEN = "8926291831:AAF_SrgXk6E1Pwrp_TprNrMLuMebzh6i8hs"
 bot = telebot.TeleBot(TOKEN)
 
-# ---------- база ----------
+# ---------- база данных ----------
 def init_db():
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
@@ -40,7 +40,7 @@ def init_db():
     conn.close()
 init_db()
 
-# ---------- helpers ----------
+# ---------- вспомогательные функции ----------
 def is_subscribed(user_id, channel_id):
     try:
         member = bot.get_chat_member(channel_id, user_id)
@@ -78,6 +78,7 @@ def add_participant(contest_id, user_id, username, source):
     return True
 
 def choose_winners(contest_id):
+    """Выбирает победителей и отправляет сообщение в канал с упоминаниями"""
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute("SELECT winners_count, channel_id, text FROM contests WHERE id=?", (contest_id,))
@@ -98,14 +99,18 @@ def choose_winners(contest_id):
     conn.commit()
     conn.close()
 
+    # Формируем список победителей с упоминаниями
     winner_mentions = []
     for user_id, username in winners:
         if username:
             winner_mentions.append("@" + username)
         else:
+            # Если нет username, используем ссылку на профиль
             winner_mentions.append("[пользователь](tg://user?id={})".format(user_id))
     result_text = "розыгрыш завершён!\n\nконкурс: " + text[:100] + "...\n\nпобедители:\n" + "\n".join(winner_mentions)
+    # Отправляем в канал
     bot.send_message(channel_id, result_text, parse_mode="Markdown")
+    # Отправляем личные сообщения победителям
     for user_id, username in winners:
         try:
             bot.send_message(user_id, "поздравляем! вы выиграли в конкурсе: " + text[:100] + "...")
@@ -115,6 +120,7 @@ def choose_winners(contest_id):
 # ---------- обработчик сообщений (для комментариев) ----------
 @bot.message_handler(func=lambda msg: True)
 def handle_comment(msg):
+    # Проверяем, что это ответ на сообщение
     if not msg.reply_to_message:
         return
     reply_to_id = msg.reply_to_message.message_id
@@ -123,6 +129,7 @@ def handle_comment(msg):
     if not user or user.is_bot:
         return
 
+    # Ищем активный конкурс с таким message_id и методом 'comment' или 'both'
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute("SELECT id, participants_limit, end_type FROM contests WHERE status='active' AND channel_id=? AND message_id=? AND method IN ('comment','both')", (chat_id, reply_to_id))
@@ -132,17 +139,19 @@ def handle_comment(msg):
         return
     contest_id, limit, end_type = row
 
+    # Проверяем подписку
     if not is_subscribed(user.id, chat_id):
         bot.reply_to(msg, "вы не подписаны на канал, чтобы участвовать.")
         return
 
+    # Добавляем участника
     added = add_participant(contest_id, user.id, user.username or "", "comment")
     if added and end_type == 'limit':
         current = get_participants_count(contest_id)
         if current >= limit:
             choose_winners(contest_id)
 
-# ---------- конкурсы по времени (фон) ----------
+# ---------- фоновая проверка конкурсов по времени ----------
 def check_time_contests():
     now = int(time.time())
     conn = sqlite3.connect('giveaway.db')
@@ -156,7 +165,7 @@ def check_time_contests():
 
 threading.Timer(60, check_time_contests).start()
 
-# ---------- /start ----------
+# ---------- команда /start ----------
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = InlineKeyboardMarkup(row_width=1)
@@ -188,7 +197,7 @@ def my_contests(call):
         text += "#" + str(row[0]) + ": " + row[1][:50] + "... (статус: " + status_emoji + ")\n"
     bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
 
-# ---------- создание конкурса ----------
+# ---------- создание конкурса (пошагово) ----------
 user_data = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_contest")
@@ -326,6 +335,7 @@ def finish_creation(message, chat_id):
     conn.commit()
     conn.close()
 
+    # Подготавливаем кнопку и текст
     markup = InlineKeyboardMarkup()
     caption = "розыгрыш!\n\n" + data['text'] + "\n\nнужно участников: " + str(data['limit']) + "\nпобедителей: " + str(data['winners']) + "\n"
     if data['method'] in ['button', 'both']:
@@ -338,10 +348,12 @@ def finish_creation(message, chat_id):
         caption += "\n\nконкурс завершится через " + str(minutes_left) + " минут."
 
     try:
+        # Отправляем в канал (с кнопкой, если она есть)
         if data['photo']:
-            sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup, parse_mode="Markdown")
+            sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
         else:
-            sent = bot.send_message(data['channel_id'], caption, reply_markup=markup, parse_mode="Markdown")
+            sent = bot.send_message(data['channel_id'], caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
+        # Сохраняем message_id для обработки комментариев
         if data['method'] in ['comment', 'both']:
             conn = sqlite3.connect('giveaway.db')
             cur = conn.cursor()
