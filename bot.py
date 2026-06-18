@@ -87,6 +87,7 @@ def add_participant(contest_id, user_id, username, source, comment_text=None):
                 (contest_id, user_id, username, comment_text, int(time.time()), source))
     conn.commit()
     conn.close()
+    print(f"добавлен участник: {username} (id: {user_id}) для конкурса {contest_id} через {source}")
     update_participants_button(contest_id)
     return True
 
@@ -104,17 +105,25 @@ def update_participants_button(contest_id):
     markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
     try:
         bot.edit_message_reply_markup(chat_id=channel_id, message_id=message_id, reply_markup=markup)
+        print(f"обновлена кнопка для конкурса {contest_id}, участников: {count}")
     except Exception as e:
         print(f"не удалось обновить кнопку: {e}")
 
 def choose_winners(contest_id):
+    print(f"запущен выбор победителей для конкурса {contest_id}")
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute("SELECT winners_count, channel_id, text FROM contests WHERE id=?", (contest_id,))
     winners_count, channel_id, text = cur.fetchone()
     cur.execute("SELECT user_id, username, comment_text FROM participants WHERE contest_id=?", (contest_id,))
     participants = cur.fetchall()
+    print(f"найдено участников: {len(participants)}")
     if not participants:
+        # отправляем сообщение, что никто не участвовал
+        try:
+            bot.send_message(channel_id, "конкурс завершён, но никто не участвовал.")
+        except Exception as e:
+            print(f"ошибка отправки сообщения о пустом конкурсе: {e}")
         cur.execute("UPDATE contests SET status='finished' WHERE id=?", (contest_id,))
         conn.commit()
         conn.close()
@@ -137,8 +146,14 @@ def choose_winners(contest_id):
     result_text = "конкурс завершён!\n\n" + text[:100] + "...\n\nпобедители:\n" + "\n".join(winner_lines)
     try:
         bot.send_message(channel_id, result_text, parse_mode="Markdown")
+        print(f"сообщение о победителях отправлено в канал {channel_id}")
     except Exception as e:
-        bot.send_message(channel_id, result_text)  # без форматирования, если ошибка
+        # пробуем без форматирования
+        try:
+            bot.send_message(channel_id, result_text)
+            print(f"сообщение отправлено без Markdown")
+        except Exception as e2:
+            print(f"ошибка отправки сообщения: {e2}")
     for user_id, username, comment in winners:
         try:
             bot.send_message(user_id, f"поздравляем! вы выиграли в конкурсе: {text[:100]}...")
@@ -162,6 +177,7 @@ def handle_comment(msg):
     if not row:
         return
     contest_id, extra_channels = row
+    print(f"найден конкурс {contest_id} по комментарию от {user.username}")
 
     channels_to_check = [REQUIRED_CHANNEL, chat_id]
     if extra_channels:
@@ -174,6 +190,8 @@ def handle_comment(msg):
     added = add_participant(contest_id, user.id, user.username or "", "comment", msg.text)
     if added:
         bot.reply_to(msg, "вы записаны на конкурс!")
+    else:
+        bot.reply_to(msg, "вы уже участвуете!")
 
 # ---------- фоновая проверка по времени ----------
 def check_time_contests():
@@ -365,14 +383,13 @@ def finish_creation(message, chat_id):
     if channels_to_show:
         caption += "обязательная подписка на каналы: " + ", ".join(channels_to_show) + "\n"
 
-    # Добавляем способ участия
     if data['method'] == 'button':
         caption += "нажмите кнопку, чтобы участвовать."
         count = 0
         markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
     elif data['method'] == 'comment':
         caption += "оставьте комментарий под этим постом."
-    else:  # both
+    else:
         caption += "нажмите кнопку или оставьте комментарий под этим постом."
         count = 0
         markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
@@ -385,11 +402,13 @@ def finish_creation(message, chat_id):
             sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
         else:
             sent = bot.send_message(data['channel_id'], caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
+        # СОХРАНЯЕМ message_id ВСЕГДА
         conn = sqlite3.connect('giveaway.db')
         cur = conn.cursor()
         cur.execute("UPDATE contests SET message_id=? WHERE id=?", (sent.message_id, contest_id))
         conn.commit()
         conn.close()
+        print(f"конкурс {contest_id} создан, message_id = {sent.message_id}")
         bot.send_message(chat_id, "конкурс создан и опубликован.")
     except Exception as e:
         bot.send_message(chat_id, "ошибка публикации: " + str(e) + "\nпроверьте права бота.")
