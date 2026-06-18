@@ -78,7 +78,6 @@ def add_participant(contest_id, user_id, username, source):
     return True
 
 def choose_winners(contest_id):
-    """Выбирает победителей и отправляет сообщение в канал с упоминаниями"""
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute("SELECT winners_count, channel_id, text FROM contests WHERE id=?", (contest_id,))
@@ -99,37 +98,29 @@ def choose_winners(contest_id):
     conn.commit()
     conn.close()
 
-    # Формируем список победителей с упоминаниями
     winner_mentions = []
     for user_id, username in winners:
         if username:
             winner_mentions.append("@" + username)
         else:
-            # Если нет username, используем ссылку на профиль
             winner_mentions.append("[пользователь](tg://user?id={})".format(user_id))
     result_text = "розыгрыш завершён!\n\nконкурс: " + text[:100] + "...\n\nпобедители:\n" + "\n".join(winner_mentions)
-    # Отправляем в канал
     bot.send_message(channel_id, result_text, parse_mode="Markdown")
-    # Отправляем личные сообщения победителям
     for user_id, username in winners:
         try:
             bot.send_message(user_id, "поздравляем! вы выиграли в конкурсе: " + text[:100] + "...")
         except:
             pass
 
-# ---------- обработчик сообщений (для комментариев) ----------
-@bot.message_handler(func=lambda msg: True)
+# ---------- ОБРАБОТЧИК КОММЕНТАРИЕВ (только ответы) ----------
+@bot.message_handler(func=lambda msg: msg.reply_to_message is not None)
 def handle_comment(msg):
-    # Проверяем, что это ответ на сообщение
-    if not msg.reply_to_message:
-        return
     reply_to_id = msg.reply_to_message.message_id
     chat_id = str(msg.chat.id)
     user = msg.from_user
     if not user or user.is_bot:
         return
 
-    # Ищем активный конкурс с таким message_id и методом 'comment' или 'both'
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute("SELECT id, participants_limit, end_type FROM contests WHERE status='active' AND channel_id=? AND message_id=? AND method IN ('comment','both')", (chat_id, reply_to_id))
@@ -139,12 +130,10 @@ def handle_comment(msg):
         return
     contest_id, limit, end_type = row
 
-    # Проверяем подписку
     if not is_subscribed(user.id, chat_id):
         bot.reply_to(msg, "вы не подписаны на канал, чтобы участвовать.")
         return
 
-    # Добавляем участника
     added = add_participant(contest_id, user.id, user.username or "", "comment")
     if added and end_type == 'limit':
         current = get_participants_count(contest_id)
@@ -165,20 +154,35 @@ def check_time_contests():
 
 threading.Timer(60, check_time_contests).start()
 
-# ---------- команда /start ----------
-@bot.message_handler(commands=['start'])
-def start(message):
+# ---------- МЕНЮ (общее для /start, /67, /xyilan) ----------
+@bot.message_handler(commands=['start', '67', 'xyilan'])
+def show_menu(message):
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
         InlineKeyboardButton("добавить бота в канал", url=f"https://t.me/{bot.get_me().username}?startchannel=admin"),
         InlineKeyboardButton("создать конкурс", callback_data="create_contest"),
-        InlineKeyboardButton("мои конкурсы", callback_data="my_contests")
+        InlineKeyboardButton("мои конкурсы", callback_data="my_contests"),
+        InlineKeyboardButton("случайное число", callback_data="random_number")  # добавили кнопку
     )
     bot.send_message(message.chat.id,
                      "привет! я бот для конкурсов в каналах.\n"
                      "добавьте меня в канал как администратора с правами на отправку и чтение сообщений.\n\n"
                      "выберите действие:", reply_markup=markup, parse_mode="Markdown")
 
+# ---------- ОБРАБОТЧИК ДЛЯ КНОПКИ "случайное число" ----------
+@bot.callback_query_handler(func=lambda call: call.data == "random_number")
+def random_callback(call):
+    bot.answer_callback_query(call.id)
+    num = random.randint(1, 100)
+    bot.send_message(call.message.chat.id, f"случайное число: {num}")
+
+# ---------- КОМАНДА /random (тоже выдаёт число) ----------
+@bot.message_handler(commands=['random'])
+def random_command(message):
+    num = random.randint(1, 100)
+    bot.reply_to(message, f"случайное число: {num}")
+
+# ---------- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (конкурсы) ----------
 @bot.callback_query_handler(func=lambda call: call.data == "my_contests")
 def my_contests(call):
     bot.answer_callback_query(call.id)
@@ -197,7 +201,7 @@ def my_contests(call):
         text += "#" + str(row[0]) + ": " + row[1][:50] + "... (статус: " + status_emoji + ")\n"
     bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
 
-# ---------- создание конкурса (пошагово) ----------
+# ---------- создание конкурса ----------
 user_data = {}
 
 @bot.callback_query_handler(func=lambda call: call.data == "create_contest")
@@ -214,12 +218,12 @@ def process_channel(message, chat_id):
         chat = bot.get_chat(channel)
         if chat.type not in ['channel', 'supergroup']:
             bot.send_message(chat_id, "это не канал. введите корректный id.")
-            start(message)
+            show_menu(message)
             return
         channel_id = str(chat.id)
     except:
         bot.send_message(chat_id, "не удалось найти канал. проверьте id и права.")
-        start(message)
+        show_menu(message)
         return
     user_data[chat_id] = {'channel_id': channel_id}
     msg = bot.send_message(chat_id, "сколько участников должно набраться для розыгрыша? (введите число)")
@@ -230,32 +234,32 @@ def process_limit(message, chat_id):
         limit = int(message.text)
         if limit < 2:
             bot.send_message(chat_id, "нужно минимум 2 участника.")
-            start(message)
+            show_menu(message)
             return
         user_data[chat_id]['limit'] = limit
         msg = bot.send_message(chat_id, "сколько победителей выбрать?")
         bot.register_next_step_handler(msg, process_winners, chat_id)
     except:
         bot.send_message(chat_id, "ошибка! введите число.")
-        start(message)
+        show_menu(message)
 
 def process_winners(message, chat_id):
     try:
         winners = int(message.text)
         if winners < 1:
             bot.send_message(chat_id, "должен быть хотя бы 1 победитель.")
-            start(message)
+            show_menu(message)
             return
         if winners > user_data[chat_id]['limit']:
             bot.send_message(chat_id, "победителей не может быть больше участников (" + str(user_data[chat_id]['limit']) + ").")
-            start(message)
+            show_menu(message)
             return
         user_data[chat_id]['winners'] = winners
         msg = bot.send_message(chat_id, "отправьте фото для конкурса (или /skip)")
         bot.register_next_step_handler(msg, process_photo, chat_id)
     except:
         bot.send_message(chat_id, "ошибка! введите число.")
-        start(message)
+        show_menu(message)
 
 def process_photo(message, chat_id):
     if message.text and message.text.startswith('/skip'):
@@ -313,13 +317,13 @@ def process_time_minutes(message, chat_id):
         minutes = int(message.text)
         if minutes < 1:
             bot.send_message(chat_id, "время должно быть больше 0.")
-            start(message)
+            show_menu(message)
             return
         user_data[chat_id]['end_time'] = int(time.time()) + minutes * 60
         finish_creation(message, chat_id)
     except:
         bot.send_message(chat_id, "ошибка! введите целое число минут.")
-        start(message)
+        show_menu(message)
 
 def finish_creation(message, chat_id):
     data = user_data[chat_id]
@@ -335,7 +339,6 @@ def finish_creation(message, chat_id):
     conn.commit()
     conn.close()
 
-    # Подготавливаем кнопку и текст
     markup = InlineKeyboardMarkup()
     caption = "розыгрыш!\n\n" + data['text'] + "\n\nнужно участников: " + str(data['limit']) + "\nпобедителей: " + str(data['winners']) + "\n"
     if data['method'] in ['button', 'both']:
@@ -348,12 +351,10 @@ def finish_creation(message, chat_id):
         caption += "\n\nконкурс завершится через " + str(minutes_left) + " минут."
 
     try:
-        # Отправляем в канал (с кнопкой, если она есть)
         if data['photo']:
             sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
         else:
             sent = bot.send_message(data['channel_id'], caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
-        # Сохраняем message_id для обработки комментариев
         if data['method'] in ['comment', 'both']:
             conn = sqlite3.connect('giveaway.db')
             cur = conn.cursor()
@@ -364,7 +365,7 @@ def finish_creation(message, chat_id):
     except Exception as e:
         bot.send_message(chat_id, "ошибка публикации: " + str(e) + "\nпроверьте права бота.")
     del user_data[chat_id]
-    start(message)
+    show_menu(message)
 
 # ---------- участие по кнопке ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("join_"))
