@@ -87,7 +87,26 @@ def add_participant(contest_id, user_id, username, source, comment_text=None):
                 (contest_id, user_id, username, comment_text, int(time.time()), source))
     conn.commit()
     conn.close()
+    update_participants_button(contest_id)
     return True
+
+def update_participants_button(contest_id):
+    """Обновляет кнопку с актуальным количеством участников"""
+    contest = get_contest(contest_id)
+    if not contest:
+        return
+    channel_id = contest[2]
+    message_id = contest[8]
+    method = contest[6]
+    if not message_id or method not in ['button', 'both']:
+        return
+    count = get_participants_count(contest_id)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
+    try:
+        bot.edit_message_reply_markup(chat_id=channel_id, message_id=message_id, reply_markup=markup)
+    except Exception as e:
+        print(f"не удалось обновить кнопку: {e}")
 
 def choose_winners(contest_id):
     conn = sqlite3.connect('giveaway.db')
@@ -97,11 +116,12 @@ def choose_winners(contest_id):
     cur.execute("SELECT user_id, username, comment_text FROM participants WHERE contest_id=?", (contest_id,))
     participants = cur.fetchall()
     if not participants:
-        bot.send_message(channel_id, "недостаточно участников для розыгрыша.")
-        cur.execute("UPDATE contests SET status='cancelled' WHERE id=?", (contest_id,))
+        # просто завершаем конкурс, ничего не пишем
+        cur.execute("UPDATE contests SET status='finished' WHERE id=?", (contest_id,))
         conn.commit()
         conn.close()
         return
+    # если участников меньше или равно призовым местам — все побеждают
     if len(participants) <= winners_count:
         winners = participants
     else:
@@ -187,12 +207,12 @@ def show_menu(message):
 @bot.callback_query_handler(func=lambda call: call.data == "random_number")
 def random_callback(call):
     bot.answer_callback_query(call.id)
-    num = random.randint(1, 100)
+    num = random.randint(1, 30)
     bot.send_message(call.message.chat.id, f"случайное число: {num}")
 
 @bot.message_handler(commands=['random'])
 def random_command(message):
-    num = random.randint(1, 100)
+    num = random.randint(1, 30)
     bot.reply_to(message, f"случайное число: {num}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "my_contests")
@@ -315,7 +335,7 @@ def process_time_minutes(message, chat_id):
             bot.send_message(chat_id, "время должно быть больше 0.")
             show_menu(message)
             return
-        end_time = int(time.time()) + minutes * 60
+        end_time = int(time.time()) + minutes * 60  # ровно столько минут, без умножения на 2
         user_data[chat_id]['end_time'] = end_time
         finish_creation(message, chat_id)
     except:
@@ -336,6 +356,7 @@ def finish_creation(message, chat_id):
     conn.commit()
     conn.close()
 
+    # Подготавливаем пост
     markup = InlineKeyboardMarkup()
     caption = "розыгрыш!\n\n" + data['text'] + "\n\nпобедителей: " + str(data['winners']) + "\n"
     channels_to_show = [REQUIRED_CHANNEL]
@@ -345,7 +366,8 @@ def finish_creation(message, chat_id):
         caption += "\nобязательная подписка на каналы: " + ", ".join(channels_to_show)
 
     if data['method'] in ['button', 'both']:
-        markup.add(InlineKeyboardButton("участвую", callback_data="join_" + str(contest_id)))
+        count = 0
+        markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
         caption += "\nнажмите кнопку, чтобы участвовать."
     if data['method'] in ['comment', 'both']:
         caption += "\n\nили оставьте комментарий под этим постом."
@@ -358,12 +380,12 @@ def finish_creation(message, chat_id):
             sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
         else:
             sent = bot.send_message(data['channel_id'], caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
-        if data['method'] in ['comment', 'both']:
-            conn = sqlite3.connect('giveaway.db')
-            cur = conn.cursor()
-            cur.execute("UPDATE contests SET message_id=? WHERE id=?", (sent.message_id, contest_id))
-            conn.commit()
-            conn.close()
+        # сохраняем message_id для всех методов (нужен для обновления кнопки и комментариев)
+        conn = sqlite3.connect('giveaway.db')
+        cur = conn.cursor()
+        cur.execute("UPDATE contests SET message_id=? WHERE id=?", (sent.message_id, contest_id))
+        conn.commit()
+        conn.close()
         bot.send_message(chat_id, "конкурс создан и опубликован.")
     except Exception as e:
         bot.send_message(chat_id, "ошибка публикации: " + str(e) + "\nпроверьте права бота.")
@@ -383,7 +405,7 @@ def join_contest(call):
         return
 
     channel_id = contest[2]
-    extra_channels = contest[8]
+    extra_channels = contest[9]
 
     channels_to_check = [REQUIRED_CHANNEL, channel_id]
     if extra_channels:
