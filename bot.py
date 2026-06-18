@@ -26,6 +26,7 @@ def init_db():
         end_time INTEGER,
         message_id INTEGER,
         extra_channels TEXT,
+        contest_type TEXT,          -- 'full' или 'simple'
         status TEXT DEFAULT 'active',
         created_at INTEGER
     )''')
@@ -87,7 +88,6 @@ def add_participant(contest_id, user_id, username, source, comment_text=None):
                 (contest_id, user_id, username, comment_text, int(time.time()), source))
     conn.commit()
     conn.close()
-    print(f"добавлен участник: {username} (id: {user_id}) для конкурса {contest_id} через {source}")
     update_participants_button(contest_id)
     return True
 
@@ -105,25 +105,21 @@ def update_participants_button(contest_id):
     markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
     try:
         bot.edit_message_reply_markup(chat_id=channel_id, message_id=message_id, reply_markup=markup)
-        print(f"обновлена кнопка для конкурса {contest_id}, участников: {count}")
     except Exception as e:
         print(f"не удалось обновить кнопку: {e}")
 
-def choose_winners(contest_id):
-    print(f"запущен выбор победителей для конкурса {contest_id}")
+# ---------- завершение конкурсов ----------
+def finish_full_contest(contest_id):
+    """Обычный конкурс: выбирает победителей из участников"""
+    print(f"завершение обычного конкурса {contest_id}")
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute("SELECT winners_count, channel_id, text FROM contests WHERE id=?", (contest_id,))
     winners_count, channel_id, text = cur.fetchone()
     cur.execute("SELECT user_id, username, comment_text FROM participants WHERE contest_id=?", (contest_id,))
     participants = cur.fetchall()
-    print(f"найдено участников: {len(participants)}")
     if not participants:
-        # отправляем сообщение, что никто не участвовал
-        try:
-            bot.send_message(channel_id, "конкурс завершён, но никто не участвовал.")
-        except Exception as e:
-            print(f"ошибка отправки сообщения о пустом конкурсе: {e}")
+        bot.send_message(channel_id, "конкурс завершён, но никто не участвовал.")
         cur.execute("UPDATE contests SET status='finished' WHERE id=?", (contest_id,))
         conn.commit()
         conn.close()
@@ -146,21 +142,49 @@ def choose_winners(contest_id):
     result_text = "конкурс завершён!\n\n" + text[:100] + "...\n\nпобедители:\n" + "\n".join(winner_lines)
     try:
         bot.send_message(channel_id, result_text, parse_mode="Markdown")
-        print(f"сообщение о победителях отправлено в канал {channel_id}")
-    except Exception as e:
-        # пробуем без форматирования
-        try:
-            bot.send_message(channel_id, result_text)
-            print(f"сообщение отправлено без Markdown")
-        except Exception as e2:
-            print(f"ошибка отправки сообщения: {e2}")
+    except:
+        bot.send_message(channel_id, result_text)
     for user_id, username, comment in winners:
         try:
             bot.send_message(user_id, f"поздравляем! вы выиграли в конкурсе: {text[:100]}...")
         except:
             pass
 
-# ---------- ОБРАБОТЧИК КОММЕНТАРИЕВ ----------
+def finish_simple_contest(contest_id):
+    """Простой конкурс: случайный номер комментария от 1 до 26"""
+    print(f"завершение простого конкурса {contest_id}")
+    conn = sqlite3.connect('giveaway.db')
+    cur = conn.cursor()
+    cur.execute("SELECT channel_id, text FROM contests WHERE id=?", (contest_id,))
+    channel_id, text = cur.fetchone()
+    cur.execute("UPDATE contests SET status='finished' WHERE id=?", (contest_id,))
+    conn.commit()
+    conn.close()
+    winner_num = random.randint(1, 26)
+    result_msg = f"конкурс завершён!\n\n{text[:100]}...\n\nвыиграл коммент #{winner_num}"
+    try:
+        bot.send_message(channel_id, result_msg)
+    except Exception as e:
+        print(f"ошибка отправки: {e}")
+
+# ---------- фоновая проверка по времени ----------
+def check_time_contests():
+    now = int(time.time())
+    conn = sqlite3.connect('giveaway.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, contest_type FROM contests WHERE status='active' AND end_time <= ?", (now,))
+    rows = cur.fetchall()
+    conn.close()
+    for contest_id, ctype in rows:
+        if ctype == 'full':
+            finish_full_contest(contest_id)
+        else:
+            finish_simple_contest(contest_id)
+    threading.Timer(60, check_time_contests).start()
+
+threading.Timer(60, check_time_contests).start()
+
+# ---------- ОБРАБОТЧИК КОММЕНТАРИЕВ (только для обычных конкурсов) ----------
 @bot.message_handler(func=lambda msg: msg.reply_to_message is not None)
 def handle_comment(msg):
     reply_to_id = msg.reply_to_message.message_id
@@ -171,13 +195,12 @@ def handle_comment(msg):
 
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
-    cur.execute("SELECT id, extra_channels FROM contests WHERE status='active' AND channel_id=? AND message_id=? AND method IN ('comment','both')", (chat_id, reply_to_id))
+    cur.execute("SELECT id, extra_channels FROM contests WHERE status='active' AND channel_id=? AND message_id=? AND contest_type='full' AND method IN ('comment','both')", (chat_id, reply_to_id))
     row = cur.fetchone()
     conn.close()
     if not row:
         return
     contest_id, extra_channels = row
-    print(f"найден конкурс {contest_id} по комментарию от {user.username}")
 
     channels_to_check = [REQUIRED_CHANNEL, chat_id]
     if extra_channels:
@@ -193,20 +216,6 @@ def handle_comment(msg):
     else:
         bot.reply_to(msg, "вы уже участвуете!")
 
-# ---------- фоновая проверка по времени ----------
-def check_time_contests():
-    now = int(time.time())
-    conn = sqlite3.connect('giveaway.db')
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM contests WHERE status='active' AND end_time <= ?", (now,))
-    rows = cur.fetchall()
-    conn.close()
-    for row in rows:
-        choose_winners(row[0])
-    threading.Timer(60, check_time_contests).start()
-
-threading.Timer(60, check_time_contests).start()
-
 # ---------- МЕНЮ ----------
 @bot.message_handler(commands=['start', '67', 'xyilan'])
 def show_menu(message):
@@ -218,8 +227,8 @@ def show_menu(message):
         InlineKeyboardButton("случайное число", callback_data="random_number")
     )
     bot.send_message(message.chat.id,
-                     "привет! я бот для конкурсов в каналах.\n"
-                     "добавьте меня в канал как администратора с правами на отправку и чтение сообщений.\n\n"
+                     "привет! я бот для конкурсов.\n"
+                     "добавьте меня в канал как администратора.\n\n"
                      "выберите действие:", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "random_number")
@@ -239,7 +248,7 @@ def my_contests(call):
     user_id = call.from_user.id
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
-    cur.execute("SELECT id, text, status FROM contests WHERE creator_id=? ORDER BY created_at DESC", (user_id,))
+    cur.execute("SELECT id, text, status, contest_type FROM contests WHERE creator_id=? ORDER BY created_at DESC", (user_id,))
     rows = cur.fetchall()
     conn.close()
     if not rows:
@@ -248,7 +257,8 @@ def my_contests(call):
     text = "ваши конкурсы:\n\n"
     for row in rows:
         status_emoji = "активен" if row[2] == "active" else "завершён"
-        text += "#" + str(row[0]) + ": " + row[1][:50] + "... (статус: " + status_emoji + ")\n"
+        type_label = "обычный" if row[3] == 'full' else "простой"
+        text += f"#{row[0]} ({type_label}): {row[1][:50]}... (статус: {status_emoji})\n"
     bot.send_message(call.message.chat.id, text, parse_mode="Markdown")
 
 # ---------- СОЗДАНИЕ КОНКУРСА ----------
@@ -286,10 +296,50 @@ def process_channel(message, chat_id):
         show_menu(message)
         return
     user_data[chat_id] = {'channel_id': channel_id}
-    msg = bot.send_message(chat_id, "сколько победителей выбрать?")
-    bot.register_next_step_handler(msg, process_winners, chat_id)
+    msg = bot.send_message(chat_id, "введите текст конкурса (описание, условия)")
+    bot.register_next_step_handler(msg, process_text, chat_id)
 
-def process_winners(message, chat_id):
+def process_text(message, chat_id):
+    user_data[chat_id]['text'] = message.text
+    msg = bot.send_message(chat_id, "отправьте фото для конкурса (или /skip)")
+    bot.register_next_step_handler(msg, process_photo, chat_id)
+
+def process_photo(message, chat_id):
+    if message.text and message.text.startswith('/skip'):
+        user_data[chat_id]['photo'] = None
+        ask_type(message, chat_id)
+        return
+    if message.photo:
+        user_data[chat_id]['photo'] = message.photo[-1].file_id
+        ask_type(message, chat_id)
+    else:
+        bot.send_message(chat_id, "отправьте фото или /skip")
+        bot.register_next_step_handler(message, process_photo, chat_id)
+
+def ask_type(message, chat_id):
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("обычный (сбор участников)", callback_data="type_full"),
+        InlineKeyboardButton("простой (рандомный номер)", callback_data="type_simple")
+    )
+    bot.send_message(chat_id, "выберите тип конкурса:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("type_"))
+def process_type(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    ctype = call.data.split("_")[1]  # full или simple
+    user_data[chat_id]['contest_type'] = ctype
+    if ctype == 'full':
+        # запрос количества победителей
+        msg = bot.send_message(chat_id, "сколько победителей выбрать?")
+        bot.register_next_step_handler(msg, process_winners_full, chat_id)
+    else:
+        # простой: сразу время
+        msg = bot.send_message(chat_id, "через сколько минут завершить конкурс? (введите число)")
+        bot.register_next_step_handler(msg, process_time_simple, chat_id)
+
+def process_winners_full(message, chat_id):
     try:
         winners = int(message.text)
         if winners < 1:
@@ -297,45 +347,17 @@ def process_winners(message, chat_id):
             show_menu(message)
             return
         user_data[chat_id]['winners'] = winners
-        msg = bot.send_message(chat_id, "отправьте фото для конкурса (или /skip)")
-        bot.register_next_step_handler(msg, process_photo, chat_id)
+        # способ участия
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("кнопка", callback_data="method_button"),
+            InlineKeyboardButton("комментарий", callback_data="method_comment"),
+            InlineKeyboardButton("оба", callback_data="method_both")
+        )
+        bot.send_message(chat_id, "выберите способ участия:", reply_markup=markup)
     except:
         bot.send_message(chat_id, "ошибка! введите число.")
         show_menu(message)
-
-def process_photo(message, chat_id):
-    if message.text and message.text.startswith('/skip'):
-        user_data[chat_id]['photo'] = None
-        ask_text(message, chat_id)
-        return
-    if message.photo:
-        user_data[chat_id]['photo'] = message.photo[-1].file_id
-        ask_text(message, chat_id)
-    else:
-        bot.send_message(chat_id, "отправьте фото или /skip")
-        bot.register_next_step_handler(message, process_photo, chat_id)
-
-def ask_text(message, chat_id):
-    msg = bot.send_message(chat_id, "введите текст конкурса (описание, условия)")
-    bot.register_next_step_handler(msg, process_text, chat_id)
-
-def process_text(message, chat_id):
-    user_data[chat_id]['text'] = message.text
-    msg = bot.send_message(chat_id, "введите дополнительные каналы для обязательной подписки (через запятую, например @chan1, @chan2) или /skip")
-    bot.register_next_step_handler(msg, process_extra_channels, chat_id)
-
-def process_extra_channels(message, chat_id):
-    if message.text and message.text.startswith('/skip'):
-        user_data[chat_id]['extra_channels'] = ""
-    else:
-        user_data[chat_id]['extra_channels'] = message.text.strip()
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("кнопка", callback_data="method_button"),
-        InlineKeyboardButton("комментарий", callback_data="method_comment"),
-        InlineKeyboardButton("оба", callback_data="method_both")
-    )
-    bot.send_message(chat_id, "выберите способ участия:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("method_"))
 def process_method(call):
@@ -343,38 +365,46 @@ def process_method(call):
     chat_id = call.message.chat.id
     method = call.data.split("_")[1]
     user_data[chat_id]['method'] = method
-    msg = bot.send_message(chat_id, "через сколько минут завершить конкурс? (введите число)")
-    bot.register_next_step_handler(msg, process_time_minutes, chat_id)
+    # запрос дополнительных каналов
+    msg = bot.send_message(chat_id, "введите дополнительные каналы для обязательной подписки (через запятую, например @chan1, @chan2) или /skip")
+    bot.register_next_step_handler(msg, process_extra_channels_full, chat_id)
 
-def process_time_minutes(message, chat_id):
+def process_extra_channels_full(message, chat_id):
+    if message.text and message.text.startswith('/skip'):
+        user_data[chat_id]['extra_channels'] = ""
+    else:
+        user_data[chat_id]['extra_channels'] = message.text.strip()
+    msg = bot.send_message(chat_id, "через сколько минут завершить конкурс? (введите число)")
+    bot.register_next_step_handler(msg, process_time_full, chat_id)
+
+def process_time_full(message, chat_id):
     try:
         minutes = int(message.text)
         if minutes < 1:
             bot.send_message(chat_id, "время должно быть больше 0.")
             show_menu(message)
             return
-        end_time = int(time.time()) + minutes * 60
-        user_data[chat_id]['end_time'] = end_time
-        finish_creation(message, chat_id)
+        user_data[chat_id]['end_time'] = int(time.time()) + minutes * 60
+        finish_creation_full(message, chat_id)
     except:
         bot.send_message(chat_id, "ошибка! введите целое число минут.")
         show_menu(message)
 
-def finish_creation(message, chat_id):
+def finish_creation_full(message, chat_id):
     data = user_data[chat_id]
     conn = sqlite3.connect('giveaway.db')
     cur = conn.cursor()
     cur.execute('''INSERT INTO contests 
-                   (creator_id, channel_id, winners_count, text, photo_id, method, end_time, extra_channels, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                   (creator_id, channel_id, winners_count, text, photo_id, method, end_time, extra_channels, contest_type, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (message.from_user.id, data['channel_id'], data['winners'],
                  data['text'], data['photo'], data['method'], data['end_time'],
-                 data.get('extra_channels', ''), int(time.time())))
+                 data.get('extra_channels', ''), 'full', int(time.time())))
     contest_id = cur.lastrowid
     conn.commit()
     conn.close()
 
-    # Подготавливаем пост
+    # Публикация поста
     markup = InlineKeyboardMarkup()
     caption = data['text'] + "\n\nпобедителей: " + str(data['winners']) + "\n"
     channels_to_show = [REQUIRED_CHANNEL]
@@ -383,16 +413,14 @@ def finish_creation(message, chat_id):
     if channels_to_show:
         caption += "обязательная подписка на каналы: " + ", ".join(channels_to_show) + "\n"
 
-    if data['method'] == 'button':
+    if data['method'] in ['button', 'both']:
+        markup.add(InlineKeyboardButton("участвую (0)", callback_data=f"join_{contest_id}"))
         caption += "нажмите кнопку, чтобы участвовать."
-        count = 0
-        markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
-    elif data['method'] == 'comment':
-        caption += "оставьте комментарий под этим постом."
-    else:
-        caption += "нажмите кнопку или оставьте комментарий под этим постом."
-        count = 0
-        markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
+    if data['method'] in ['comment', 'both']:
+        if data['method'] == 'both':
+            caption += " или оставьте комментарий под этим постом."
+        else:
+            caption += "оставьте комментарий под этим постом."
 
     minutes_left = int((data['end_time'] - time.time()) / 60)
     caption += "\n\nконкурс завершится через " + str(minutes_left) + " минут."
@@ -402,20 +430,64 @@ def finish_creation(message, chat_id):
             sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
         else:
             sent = bot.send_message(data['channel_id'], caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
-        # СОХРАНЯЕМ message_id ВСЕГДА
+        # сохраняем message_id
         conn = sqlite3.connect('giveaway.db')
         cur = conn.cursor()
         cur.execute("UPDATE contests SET message_id=? WHERE id=?", (sent.message_id, contest_id))
         conn.commit()
         conn.close()
-        print(f"конкурс {contest_id} создан, message_id = {sent.message_id}")
-        bot.send_message(chat_id, "конкурс создан и опубликован.")
+        bot.send_message(chat_id, "обычный конкурс создан и опубликован.")
     except Exception as e:
         bot.send_message(chat_id, "ошибка публикации: " + str(e) + "\nпроверьте права бота.")
     del user_data[chat_id]
     show_menu(message)
 
-# ---------- УЧАСТИЕ ПО КНОПКЕ ----------
+def process_time_simple(message, chat_id):
+    try:
+        minutes = int(message.text)
+        if minutes < 1:
+            bot.send_message(chat_id, "время должно быть больше 0.")
+            show_menu(message)
+            return
+        user_data[chat_id]['end_time'] = int(time.time()) + minutes * 60
+        finish_creation_simple(message, chat_id)
+    except:
+        bot.send_message(chat_id, "ошибка! введите целое число минут.")
+        show_menu(message)
+
+def finish_creation_simple(message, chat_id):
+    data = user_data[chat_id]
+    conn = sqlite3.connect('giveaway.db')
+    cur = conn.cursor()
+    cur.execute('''INSERT INTO contests 
+                   (creator_id, channel_id, winners_count, text, photo_id, method, end_time, extra_channels, contest_type, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (message.from_user.id, data['channel_id'], 1,  # winners_count не используется
+                 data['text'], data['photo'], '', data['end_time'],
+                 '', 'simple', int(time.time())))
+    contest_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    caption = data['text'] + "\n\nконкурс завершится через " + str(int((data['end_time'] - time.time()) / 60)) + " минут.\n\nпобедитель будет выбран случайным номером комментария от 1 до 26."
+    try:
+        if data['photo']:
+            sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, parse_mode="Markdown")
+        else:
+            sent = bot.send_message(data['channel_id'], caption, parse_mode="Markdown")
+        # сохраняем message_id (необязательно, но для порядка)
+        conn = sqlite3.connect('giveaway.db')
+        cur = conn.cursor()
+        cur.execute("UPDATE contests SET message_id=? WHERE id=?", (sent.message_id, contest_id))
+        conn.commit()
+        conn.close()
+        bot.send_message(chat_id, "простой конкурс создан и опубликован.")
+    except Exception as e:
+        bot.send_message(chat_id, "ошибка публикации: " + str(e) + "\nпроверьте права бота.")
+    del user_data[chat_id]
+    show_menu(message)
+
+# ---------- УЧАСТИЕ ПО КНОПКЕ (только для обычных) ----------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("join_"))
 def join_contest(call):
     contest_id = int(call.data.split("_")[1])
@@ -423,8 +495,8 @@ def join_contest(call):
     username = call.from_user.username or ""
 
     contest = get_contest(contest_id)
-    if not contest or contest[10] != 'active':
-        bot.answer_callback_query(call.id, "конкурс не активен.", show_alert=True)
+    if not contest or contest[11] != 'active' or contest[10] != 'full':  # status и contest_type
+        bot.answer_callback_query(call.id, "конкурс не активен или не того типа.", show_alert=True)
         return
 
     channel_id = contest[2]
@@ -444,6 +516,25 @@ def join_contest(call):
         bot.answer_callback_query(call.id, "вы уже участвуете!", show_alert=True)
         return
     bot.answer_callback_query(call.id, "вы записаны.")
+
+# ---------- команда для принудительного завершения (тест) ----------
+@bot.message_handler(commands=['finish'])
+def force_finish(message):
+    user_id = message.from_user.id
+    conn = sqlite3.connect('giveaway.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, contest_type FROM contests WHERE creator_id=? AND status='active' ORDER BY created_at DESC LIMIT 1", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        contest_id, ctype = row
+        if ctype == 'full':
+            finish_full_contest(contest_id)
+        else:
+            finish_simple_contest(contest_id)
+        bot.reply_to(message, "конкурс принудительно завершён")
+    else:
+        bot.reply_to(message, "нет активных конкурсов")
 
 # ---------- ЗАПУСК ----------
 if __name__ == "__main__":
