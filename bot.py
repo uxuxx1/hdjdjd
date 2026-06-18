@@ -91,7 +91,6 @@ def add_participant(contest_id, user_id, username, source, comment_text=None):
     return True
 
 def update_participants_button(contest_id):
-    """Обновляет кнопку с актуальным количеством участников"""
     contest = get_contest(contest_id)
     if not contest:
         return
@@ -116,12 +115,10 @@ def choose_winners(contest_id):
     cur.execute("SELECT user_id, username, comment_text FROM participants WHERE contest_id=?", (contest_id,))
     participants = cur.fetchall()
     if not participants:
-        # просто завершаем конкурс, ничего не пишем
         cur.execute("UPDATE contests SET status='finished' WHERE id=?", (contest_id,))
         conn.commit()
         conn.close()
         return
-    # если участников меньше или равно призовым местам — все побеждают
     if len(participants) <= winners_count:
         winners = participants
     else:
@@ -137,8 +134,11 @@ def choose_winners(contest_id):
             winner_lines.append(f"юз: {mention}, коммент: {comment[:50]}...")
         else:
             winner_lines.append(f"юз: {mention} (без комментария)")
-    result_text = "розыгрыш завершён!\n\nконкурс: " + text[:100] + "...\n\nпобедители:\n" + "\n".join(winner_lines)
-    bot.send_message(channel_id, result_text, parse_mode="Markdown")
+    result_text = "конкурс завершён!\n\n" + text[:100] + "...\n\nпобедители:\n" + "\n".join(winner_lines)
+    try:
+        bot.send_message(channel_id, result_text, parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(channel_id, result_text)  # без форматирования, если ошибка
     for user_id, username, comment in winners:
         try:
             bot.send_message(user_id, f"поздравляем! вы выиграли в конкурсе: {text[:100]}...")
@@ -335,7 +335,7 @@ def process_time_minutes(message, chat_id):
             bot.send_message(chat_id, "время должно быть больше 0.")
             show_menu(message)
             return
-        end_time = int(time.time()) + minutes * 60  # ровно столько минут, без умножения на 2
+        end_time = int(time.time()) + minutes * 60
         user_data[chat_id]['end_time'] = end_time
         finish_creation(message, chat_id)
     except:
@@ -358,19 +358,24 @@ def finish_creation(message, chat_id):
 
     # Подготавливаем пост
     markup = InlineKeyboardMarkup()
-    caption = "розыгрыш!\n\n" + data['text'] + "\n\nпобедителей: " + str(data['winners']) + "\n"
+    caption = data['text'] + "\n\nпобедителей: " + str(data['winners']) + "\n"
     channels_to_show = [REQUIRED_CHANNEL]
     if data.get('extra_channels'):
         channels_to_show.extend([ch.strip() for ch in data['extra_channels'].split(',') if ch.strip()])
     if channels_to_show:
-        caption += "\nобязательная подписка на каналы: " + ", ".join(channels_to_show)
+        caption += "обязательная подписка на каналы: " + ", ".join(channels_to_show) + "\n"
 
-    if data['method'] in ['button', 'both']:
+    # Добавляем способ участия
+    if data['method'] == 'button':
+        caption += "нажмите кнопку, чтобы участвовать."
         count = 0
         markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
-        caption += "\nнажмите кнопку, чтобы участвовать."
-    if data['method'] in ['comment', 'both']:
-        caption += "\n\nили оставьте комментарий под этим постом."
+    elif data['method'] == 'comment':
+        caption += "оставьте комментарий под этим постом."
+    else:  # both
+        caption += "нажмите кнопку или оставьте комментарий под этим постом."
+        count = 0
+        markup.add(InlineKeyboardButton(f"участвую ({count})", callback_data=f"join_{contest_id}"))
 
     minutes_left = int((data['end_time'] - time.time()) / 60)
     caption += "\n\nконкурс завершится через " + str(minutes_left) + " минут."
@@ -380,7 +385,6 @@ def finish_creation(message, chat_id):
             sent = bot.send_photo(data['channel_id'], data['photo'], caption=caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
         else:
             sent = bot.send_message(data['channel_id'], caption, reply_markup=markup if markup.keyboard else None, parse_mode="Markdown")
-        # сохраняем message_id для всех методов (нужен для обновления кнопки и комментариев)
         conn = sqlite3.connect('giveaway.db')
         cur = conn.cursor()
         cur.execute("UPDATE contests SET message_id=? WHERE id=?", (sent.message_id, contest_id))
