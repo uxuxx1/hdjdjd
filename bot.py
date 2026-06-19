@@ -5,7 +5,7 @@ import random
 import time
 import threading
 
-TOKEN = "8926291831:AAF9_wut6sfAJ9vLbGxOnzZ58CuBTMsAPIg"
+TOKEN = "8926291831:AAF9_wut6sfAJ9vLbGxOnzZ58CuBTMsAPIg"  # Обновлённый токен
 bot = telebot.TeleBot(TOKEN)
 
 # ---------- Глобальные настройки ----------
@@ -160,7 +160,7 @@ def finish_simple_contest(contest_id):
     cur.execute("UPDATE contests SET status='finished' WHERE id=?", (contest_id,))
     conn.commit()
     conn.close()
-    winner_num = random.randint(1, 32)  # Изменено с 26 на 32
+    winner_num = random.randint(1, 32)
     result_msg = f"Конкурс завершён!\n\n{text[:100]}...\n\nПобедил комментарий #{winner_num}"
     try:
         bot.send_message(channel_id, result_msg)
@@ -532,4 +532,5 @@ def force_finish(message):
 # ---------- Запуск ----------
 if __name__ == "__main__":
     print("Бот запущен...")
-    bot.polling(none_stop=True)
+    # Добавляем allowed_updates, чтобы игнорировать новые типы (chat_boost и т.д.)
+    bot.polling(none_stop=True, allowed_updates=['message', 'callback_query'])
