@@ -5,7 +5,7 @@ import random
 import time
 import threading
 
-TOKEN = "8926291831:AAF_SrgXk6E1Pwrp_TprNrMLuMebzh6i8hs"
+TOKEN = "8926291831:AAF9_wut6sfAJ9vLbGxOnzZ58CuBTMsAPIg"
 bot = telebot.TeleBot(TOKEN)
 
 # ---------- Глобальные настройки ----------
